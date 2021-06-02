@@ -237,7 +237,7 @@ std_dev = 0.5 #1.5
 min_std_dev = 0.01
 ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.ones(1))
 
-model_path = "TD3-CartPoleWobbleContinuousEnv-v0_No4"
+model_path = "TD3-CartPoleWobbleContinuousEnv-v0_No9"
 
 actor_model = get_actor()
 critic_model = get_critic()
