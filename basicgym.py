@@ -233,15 +233,15 @@ print("Size of State Space ->  {}".format(num_states))
 num_actions = env.action_space.shape[0]
 print("Size of Action Space ->  {}".format(num_actions))
 
-upper_bound = 1.0 #env.action_space.high[0]
+upper_bound = +1.0 #env.action_space.high[0]
 lower_bound = -1.0 #env.action_space.low[0]
 
 print("Max Value of Action ->  {}".format(upper_bound))
 print("Min Value of Action ->  {}".format(lower_bound))
 
-TD3 = True
+TD3 = False
 
-std_dev = 1.5
+std_dev = 0.1 #1.5
 min_std_dev = 0.01
 ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.ones(1))
 
@@ -266,7 +266,7 @@ critic_optimizer = tf.keras.optimizers.Adam(critic_lr)
 critic2_optimizer = tf.keras.optimizers.Adam(critic_lr) if TD3 else None
 actor_optimizer = tf.keras.optimizers.Adam(actor_lr)
 
-total_episodes = 4000
+total_episodes = 1000
 # Discount factor for future rewards
 gamma = 0.99
 # Used to update target networks
@@ -279,53 +279,81 @@ ep_reward_list = []
 # To store average reward history of last few episodes
 avg_reward_list = []
 
-# Takes about 4 min to train
-for ep in range(total_episodes):
+try:
+    # Takes about 4 min to train
+    for ep in range(total_episodes):
 
-    if problem in envs_pyb: env.render()
-    prev_state = env.reset()
-    episodic_reward = 0
+        if problem in envs_pyb: env.render()
+        prev_state = env.reset()
+        episodic_reward = 0
 
-    moves = []
-    for step in range(10000000):
-        # Uncomment this to see the Actor in action
-        # But not in a python notebook.
-        if ep % 5 == 0: env.render()
-        # env.render()
+        moves = []
+        for step in range(10000000):
+            # Uncomment this to see the Actor in action
+            # But not in a python notebook.
+            if ep % 5 == 0: env.render()
+            # env.render()
 
-        tf_prev_state = tf.expand_dims(tf.convert_to_tensor(prev_state), 0)
+            tf_prev_state = tf.expand_dims(tf.convert_to_tensor(prev_state), 0)
 
-        action = policy(tf_prev_state, ou_noise)
-        moves.append(action)
-        # Recieve state and reward from environment.
-        state, reward, done, info = env.step(action)
+            action = policy(tf_prev_state, ou_noise)
+            moves.append(action)
+            # Recieve state and reward from environment.
+            state, reward, done, info = env.step(action)
 
-        buffer.record((prev_state, action, reward, state, 0.0 if done else 1.0))
-        episodic_reward += reward
+            buffer.record((prev_state, action, reward, state, 0.0 if done else 1.0))
+            episodic_reward += reward
 
-        update_actor_and_targets = not TD3 or step % 1 == 0
-        buffer.learn(update_actor_and_targets)
+            update_actor_and_targets = not TD3 or step % 1 == 0
+            buffer.learn(update_actor_and_targets)
 
-        # Update target networks every other step
-        if update_actor_and_targets:
-          update_target(target_actor.variables, actor_model.variables, tau)
-          update_target(target_critic.variables, critic_model.variables, tau)
-          if TD3: update_target(target_critic2.variables, critic2_model.variables, tau)
+            # Update target networks every other step
+            if update_actor_and_targets:
+              update_target(target_actor.variables, actor_model.variables, tau)
+              update_target(target_critic.variables, critic_model.variables, tau)
+              if TD3: update_target(target_critic2.variables, critic2_model.variables, tau)
 
-        # End this episode when `done` is True
-        if done:
-            break
+            # End this episode when `done` is True
+            if done:
+                break
 
-        prev_state = state
+            prev_state = state
 
-    # print("Single episode: ", episodic_reward)
-    ep_reward_list.append(episodic_reward)
+        # print("Single episode: ", episodic_reward)
+        ep_reward_list.append(episodic_reward)
 
-    # Mean of last 40 episodes
-    avg_reward = np.mean(ep_reward_list[-40:])
-    print(round(episodic_reward,2), ":", np.round(ou_noise.std_dev,2), "Ep * {} * AvgR = {}. AvgMove {} with mag {}".
-                                format(ep, avg_reward, round(np.mean(moves),2), round(np.mean(np.abs(moves)),2)))
-    avg_reward_list.append(avg_reward)
+        # Mean of last 40 episodes
+        avg_reward = np.mean(ep_reward_list[-40:])
+        print(round(episodic_reward,2), ":", np.round(ou_noise.std_dev,2), "Ep * {} * AvgR = {}. AvgMove {} with mag {}".
+                                    format(ep, avg_reward, round(np.mean(moves),2), round(np.mean(np.abs(moves)),2)))
+        avg_reward_list.append(avg_reward)
 
-    # Decrease noise
-    ou_noise.std_dev = np.maximum(min_std_dev, ou_noise.std_dev * 0.98)
+        # Decrease noise
+        ou_noise.std_dev = np.maximum(min_std_dev, ou_noise.std_dev * 0.98)
+
+except KeyboardInterrupt:
+    pass
+
+import os
+model_name = f'models/{"TD3" if TD3 else "DDPG"}-{problem}'
+print('Early termination, saving as {model_name}')
+i = 1
+itered = model_name
+while os.path.isdir(itered):
+    itered = f'{model_name}_No{i}'
+    i += 1
+model_name = itered
+os.mkdir(f'{model_name}')
+with open(f'{model_name}/{round(avg_reward_list[-1],2)}', 'w') as f:
+    print('Results', file=f)
+
+models = {
+    'actor': actor_model,
+    'critic': critic_model
+}
+if TD3: models['critic2'] = critic2_model
+
+for model in models:
+    path = f'{model_name}/{model}'
+    print('Saving', model, 'to', path)
+    models[model].save(path)
