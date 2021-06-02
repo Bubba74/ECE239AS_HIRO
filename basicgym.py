@@ -279,6 +279,7 @@ ep_reward_list = []
 # To store average reward history of last few episodes
 avg_reward_list = []
 
+output_csv = [["Ep","Reward","AvgReward40"]]
 try:
     # Takes about 4 min to train
     for ep in range(total_episodes):
@@ -327,6 +328,7 @@ try:
         print(round(episodic_reward,2), ":", np.round(ou_noise.std_dev,2), "Ep * {} * AvgR = {}. AvgMove {} with mag {}".
                                     format(ep, avg_reward, round(np.mean(moves),2), round(np.mean(np.abs(moves)),2)))
         avg_reward_list.append(avg_reward)
+        output_csv.append([ep, round(episodic_reward,2), round(avg_reward,2)])
 
         # Decrease noise
         ou_noise.std_dev = np.maximum(min_std_dev, ou_noise.std_dev * 0.98)
@@ -336,7 +338,7 @@ except KeyboardInterrupt:
 
 import os
 model_name = f'models/{"TD3" if TD3 else "DDPG"}-{problem}'
-print('Early termination, saving as {model_name}')
+print(f'Early termination, saving as {model_name}')
 i = 1
 itered = model_name
 while os.path.isdir(itered):
@@ -345,7 +347,8 @@ while os.path.isdir(itered):
 model_name = itered
 os.mkdir(f'{model_name}')
 with open(f'{model_name}/{round(avg_reward_list[-1],2)}', 'w') as f:
-    print('Results', file=f)
+    for arr in output_csv:
+        print(*arr, sep=', ', file=f)
 
 models = {
     'actor': actor_model,
