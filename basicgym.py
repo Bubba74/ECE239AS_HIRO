@@ -16,19 +16,11 @@ The library contains a collection of test problems — environments — that you
 
 Only requirement is to have Python 3.5+ installed on your computer. You can install it using the pip package manager or you can clone it from its github depository.
 """
-"""
-!pip install gym
 
-!apt-get install xvfb
-
-!pip install pyvirtualdisplay
-
-!mkdir images
-"""
-"""# Imports"""
-
-import pybullet_envs
 import gym
+import pybullet_envs
+import ECE239AS_Envs
+
 import tensorflow as tf
 from tensorflow.keras import layers
 import numpy as np
@@ -186,7 +178,6 @@ def get_actor():
     model = tf.keras.Model(inputs, outputs)
     return model
 
-
 def get_critic():
     # State as input
     state_input = layers.Input(shape=(num_states))
@@ -221,11 +212,12 @@ def policy(state, noise_object):
     return [np.squeeze(legal_action)]
 
 envs_pyb = ["InvertedPendulumBulletEnv-v0",
-            "CartPoleContinuousBulletEnv-v0"]
-problem = "Pendulum-v0"
+            "CartPoleContinuousBulletEnv-v0",
+            "CartPoleWobbleContinuousEnv-v0"]
+# problem = "Pendulum-v0"
 # problem = "MountainCarContinuous-v0"
 # problem = "Acrobot-v1"
-problem = envs_pyb[1]
+problem = envs_pyb[2]
 env = gym.make(problem)
 
 num_states = env.observation_space.shape[0]
@@ -239,16 +231,25 @@ lower_bound = -1.0 #env.action_space.low[0]
 print("Max Value of Action ->  {}".format(upper_bound))
 print("Min Value of Action ->  {}".format(lower_bound))
 
-TD3 = False
+TD3 = True
 
-std_dev = 0.1 #1.5
+std_dev = 0.5 #1.5
 min_std_dev = 0.01
 ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.ones(1))
+
+model_path = "TD3-CartPoleWobbleContinuousEnv-v0_No4"
 
 actor_model = get_actor()
 critic_model = get_critic()
 critic2_model = get_critic() if TD3 else None
 
+if model_path:
+    print(f'Loading old models from models/{model_path}')
+    actor_model, critic_model, critic2_model = [
+        tf.keras.models.load_model(f'models/{model_path}/actor'),
+        tf.keras.models.load_model(f'models/{model_path}/critic'),
+        tf.keras.models.load_model(f'models/{model_path}/critic2') if TD3 else None
+    ]
 target_actor = get_actor()
 target_critic = get_critic()
 target_critic2 = get_critic() if TD3 else None
@@ -301,6 +302,7 @@ try:
             moves.append(action)
             # Recieve state and reward from environment.
             state, reward, done, info = env.step(action)
+            # reward += 10*np.abs(action)
 
             buffer.record((prev_state, action, reward, state, 0.0 if done else 1.0))
             episodic_reward += reward
