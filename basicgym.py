@@ -98,14 +98,14 @@ class Buffer:
         # Training and updating Actor & Critic networks.
         # See Pseudo Code.
         target_actions = target_actor(next_state_batch, training=True)
-        if TD3: target_actions += tf.random.normal(target_actions.shape, stddev=0.0)#0.01)
+        if TD3: target_actions += tf.random.normal(target_actions.shape, stddev=0.0) #05) #0.01)
 
         # Use minimum of two target networks to calculate Q-value targets
         eval = lambda critic: reward_batch + done_batch * gamma * critic(
             [next_state_batch, target_actions], training=True
         )
         y = eval(target_critic)
-        if TD3 and not PartTD3: y = tf.math.minimum(y, eval(target_critic2))
+        if TD3: y = tf.math.minimum(y, eval(target_critic2))
 
         # Regress critic_model toward targets
         with tf.GradientTape() as tape:
@@ -116,7 +116,7 @@ class Buffer:
             zip(critic_grad, critic_model.trainable_variables)
         )
         # Regress critic2_model toward targets
-        if TD3 and not PartTD3:
+        if TD3:
           with tf.GradientTape() as tape:
               critic2_value = critic2_model([state_batch, action_batch], training=True) if TD3 else None
               critic2_loss = tf.math.reduce_mean(tf.math.square(y - critic2_value)) if TD3 else None
@@ -269,7 +269,7 @@ target_critic.set_weights(critic_model.get_weights())
 if TD3: target_critic2.set_weights(critic2_model.get_weights())
 
 # Learning rate for actor-critic models
-critic_lr = 0.002
+critic_lr = 0.001
 actor_lr = 0.001
 
 critic_optimizer = tf.keras.optimizers.Adam(critic_lr)
@@ -280,9 +280,9 @@ total_episodes = 1000
 # Discount factor for future rewards
 gamma = 0.99
 # Used to update target networks
-tau = 0.02  # Original: 0.005
+tau = 0.002  # Original: 0.005
 
-buffer = Buffer(50000, 64)
+buffer = Buffer(500000, 64)
 
 # To store reward history of each episode
 ep_reward_list = []
