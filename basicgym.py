@@ -21,6 +21,9 @@ import gym
 import pybullet_envs
 import ECE239AS_Envs
 
+from sys import argv
+from getopt import getopt
+
 import tensorflow as tf
 from tensorflow.keras import layers
 import numpy as np
@@ -169,8 +172,8 @@ def get_actor():
     last_init = tf.random_uniform_initializer(minval=-0.003, maxval=0.003)
 
     inputs = layers.Input(shape=(num_states,))
-    out = layers.Dense(32, activation="relu")(inputs)
-    out = layers.Dense(32, activation="relu")(out)
+    out = layers.Dense(ActorNN, activation="relu")(inputs)
+    out = layers.Dense(ActorNN, activation="relu")(out)
     outputs = layers.Dense(1, activation="tanh", kernel_initializer=last_init)(out)
 
     # Our upper bound is 2.0 for Pendulum.
@@ -191,8 +194,8 @@ def get_critic():
     # Both are passed through seperate layer before concatenating
     concat = layers.Concatenate()([state_out, action_out])
 
-    out = layers.Dense(32, activation="relu")(concat)
-    out = layers.Dense(32, activation="relu")(out)
+    out = layers.Dense(CriticNN, activation="relu")(concat)
+    out = layers.Dense(CriticNN, activation="relu")(out)
     outputs = layers.Dense(1)(out)
 
     # Outputs single value for give state-action
@@ -231,13 +234,18 @@ lower_bound = -1.0 #env.action_space.low[0]
 print("Max Value of Action ->  {}".format(upper_bound))
 print("Min Value of Action ->  {}".format(lower_bound))
 
-TD3 = True
+opt, args = getopt(argv[1:], "", ["TD3", "ActorNN=", "CriticNN="])
+opt = dict(opt)
+
+TD3 = "--TD3" in opt
+ActorNN = int(opt.get('--ActorNN',32))
+CriticNN = int(opt.get('--CriticNN',32))
 
 std_dev = 0.5 #1.5
 min_std_dev = 0.01
 ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.ones(1))
 
-model_path = "TD3-CartPoleWobbleContinuousEnv-v0_No9"
+model_path = None #"TD3-CartPoleWobbleContinuousEnv-v0_No9"
 
 actor_model = get_actor()
 critic_model = get_critic()
@@ -280,7 +288,8 @@ ep_reward_list = []
 # To store average reward history of last few episodes
 avg_reward_list = []
 
-output_csv = [["Ep","Reward","AvgReward40"]]
+output_csv = [["ActorNN",ActorNN,"CriticNN",CriticNN]]
+output_csv.append(["Ep","Reward","AvgReward40"])
 try:
     # Takes about 4 min to train
     for ep in range(total_episodes):
@@ -348,7 +357,7 @@ while os.path.isdir(itered):
     i += 1
 model_name = itered
 os.mkdir(f'{model_name}')
-with open(f'{model_name}/{round(avg_reward_list[-1],2)}', 'w') as f:
+with open(f'{model_name}/{round(np.max(avg_reward_list),2)}', 'w') as f:
     for arr in output_csv:
         print(*arr, sep=', ', file=f)
 

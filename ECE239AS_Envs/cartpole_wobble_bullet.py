@@ -62,4 +62,4 @@ class CartPoleWobbleContinuousEnv(CartPoleContinuousBulletEnv):
 if not id in registry.env_specs:
     gym.envs.registration.register(id,
         entry_point='ECE239AS_Envs:CartPoleWobbleContinuousEnv',
-        max_episode_steps=10000)
+        max_episode_steps=1000)
