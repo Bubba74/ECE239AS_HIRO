@@ -98,7 +98,7 @@ class Buffer:
         # Training and updating Actor & Critic networks.
         # See Pseudo Code.
         target_actions = target_actor(next_state_batch, training=True)
-        if TD3: target_actions += tf.random.normal(target_actions.shape, stddev=0.0) #05) #0.01)
+        if TD3: target_actions += tf.random.normal(target_actions.shape, stddev=0.002) #05) #0.01)
 
         # Use minimum of two target networks to calculate Q-value targets
         eval = lambda critic: reward_batch + done_batch * gamma * critic(
@@ -246,7 +246,7 @@ std_dev = 0.5 #1.5
 min_std_dev = 0.01
 ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.ones(1))
 
-model_path = None #"TD3-CartPoleWobbleContinuousEnv-v0_No9"
+model_path = "TD3-CartPoleWobbleContinuousEnv-v0_No28"
 
 actor_model = get_actor()
 critic_model = get_critic()
@@ -269,8 +269,8 @@ target_critic.set_weights(critic_model.get_weights())
 if TD3: target_critic2.set_weights(critic2_model.get_weights())
 
 # Learning rate for actor-critic models
-critic_lr = 0.001
-actor_lr = 0.001
+critic_lr = 0.002 #09  # Original: 0.002
+actor_lr = 0.001 #05   # Original: 0.001
 
 critic_optimizer = tf.keras.optimizers.Adam(critic_lr)
 critic2_optimizer = tf.keras.optimizers.Adam(critic_lr) if TD3 else None
@@ -280,7 +280,7 @@ total_episodes = 1000
 # Discount factor for future rewards
 gamma = 0.99
 # Used to update target networks
-tau = 0.002  # Original: 0.005
+tau = 0.001  # Original: 0.005
 
 buffer = Buffer(500000, 64)
 
@@ -317,7 +317,7 @@ try:
             buffer.record((prev_state, action, reward, state, 0.0 if done else 1.0))
             episodic_reward += reward
 
-            update_actor_and_targets = not TD3 or step % 1 == 0
+            update_actor_and_targets = not TD3 or step % 3 != 1
             buffer.learn(update_actor_and_targets)
 
             # Update target networks every other step
