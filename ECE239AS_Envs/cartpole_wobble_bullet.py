@@ -13,9 +13,10 @@ class CartPoleWobbleContinuousEnv(CartPoleContinuousBulletEnv):
         super().__init__(self, *args, **kwargs)
 
         # Keep track of target location
-        self.target_pos = 0.5
+        # self.target_pos = 0.5
         self.target_threshold = 0.1
         self.target_reward = 10
+        self.change_target()
 
         # Override x_threshold of CartPoleContinuousBulletEnv
         self.x_threshold = 2.4  #Original: 0.4
@@ -29,7 +30,7 @@ class CartPoleWobbleContinuousEnv(CartPoleContinuousBulletEnv):
 
     def change_target(self):
         self.target_pos = np.random.uniform(-self.x_threshold/2, self.x_threshold/2)
-        print('New Target:', np.round(self.target_pos,2))
+        print('Target:', np.round(self.target_pos,2))
 
     def step(self, action):
         raw_state, reward, done, info = super().step(action)
@@ -55,7 +56,8 @@ class CartPoleWobbleContinuousEnv(CartPoleContinuousBulletEnv):
 
     def reset(self):
         state = super().reset()
-        self.target_pos = 0.5
+        self.change_target()
+        # self.target_pos = 0.5
         state = [*state, self.target_pos]
         return state
 
