@@ -21,6 +21,7 @@ import gym
 import pybullet_envs
 import ECE239AS_Envs
 
+import os
 from sys import argv
 from getopt import getopt
 
@@ -184,6 +185,29 @@ class DDPG:
         update_target(self.target_actor.variables, self.actor.variables, self.tau)
         update_target(self.target_critic.variables, self.critic.variables, self.tau)
 
+    def save(self, dir, problem, output_csv, avg_reward_list):
+        # Construct name of model folder, create it if it does not exist
+        model_name = f'{dir}/{type(self).__name__}-{problem}'
+        os.path.isdir(model_name) or os.mkdir(model_name)
+
+        # Create unique folder for this trial
+        for i in range(1, 100000):
+            path = f'{model_name}/No{i}'
+            if (os.path.isdir(path) or os.mkdir(path)) is None:
+                break
+
+        # Create results file and write csv values
+        with open(f'{path}/{round(np.max(avg_reward_list),2)}', 'w') as f:
+            for arr in output_csv:
+                print(*arr, sep=', ', file=f)
+
+        # Write models to directory
+        self.actor.save(f'{path}/actor')
+        self.critic.save(f'{path}/critic')
+
+        # Return path so child classes can use it
+        return path
+
     # Eager execution is turned on by default in TensorFlow 2. Decorating with tf.function allows
     # TensorFlow to build a static graph out of the logic and computations in our function.
     # This provides a large speed up for blocks of code that contain many small TensorFlow operations such as this one.
@@ -207,6 +231,7 @@ class DDPG:
             zip(critic_grad, self.critic.trainable_variables)
         )
 
+
         # Return early (DO NOT update actor)
         if skip_actor: return
 
@@ -222,6 +247,8 @@ class DDPG:
         self.actor.optim.apply_gradients(
             zip(actor_grad, self.actor.trainable_variables)
         )
+
+        self.update_targets()
 
 class TD3(DDPG):
     def __init__(self, action_bound, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005):
@@ -260,6 +287,10 @@ class TD3(DDPG):
         if not self.update_trigger.active(): return
         super().update_targets()
         update_target(self.target_critic2.variables, self.critic2.variables, self.tau)
+
+    def save(self, *args):
+        path = super().save(*args)
+        self.critic2.save(f'{path}/critic2')
 
     @tf.function
     def train(self, batch):
@@ -353,12 +384,10 @@ lower_bound = -1.0 #env.action_space.low[0]
 print("Max Value of Action ->  {}".format(upper_bound))
 print("Min Value of Action ->  {}".format(lower_bound))
 
-
 opt, args = getopt(argv[1:], "", ["TD3", "ActorNN=", "CriticNN="])
 opt = dict(opt)
 
 TD3 = "--TD3" in opt
-PartTD3 = True
 ActorNN = int(opt.get('--ActorNN',32))
 CriticNN = int(opt.get('--CriticNN',32))
 
@@ -366,41 +395,8 @@ std_dev = 0.5 #1.5
 min_std_dev = 0.01
 ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.ones(1))
 
-# model_path = None # "TD3-CartPoleWobbleContinuousEnv-v0_No30"
-
-# actor_model = get_actor()
-# critic_model = get_critic()
-# critic2_model = get_critic() if TD3 else None
-
-# if model_path:
-#     print(f'Loading old models from models/{model_path}')
-#     actor_model, critic_model, critic2_model = [
-#         tf.keras.models.load_model(f'models/{model_path}/actor'),
-#         tf.keras.models.load_model(f'models/{model_path}/critic'),
-#         tf.keras.models.load_model(f'models/{model_path}/critic2') if TD3 else None
-#     ]
-# target_actor = get_actor()
-# target_critic = get_critic()
-# target_critic2 = get_critic() if TD3 else None
-#
-# # Making the weights equal initially
-# target_actor.set_weights(actor_model.get_weights())
-# target_critic.set_weights(critic_model.get_weights())
-# if TD3: target_critic2.set_weights(critic2_model.get_weights())
-#
-# # Learning rate for actor-critic models
-# critic_lr = 0.002 #09  # Original: 0.002
-# actor_lr = 0.001 #05   # Original: 0.001
-#
-# critic_optimizer = tf.keras.optimizers.Adam(critic_lr)
-# critic2_optimizer = tf.keras.optimizers.Adam(critic_lr) if TD3 else None
-# actor_optimizer = tf.keras.optimizers.Adam(actor_lr)
 
 total_episodes = 1000
-# Discount factor for future rewards
-# gamma = 0.99
-# Used to update target networks
-# tau = 0.001  # Original: 0.005
 
 action_bounds = Bounds(lower_bound, upper_bound)
 algo = DDPG(action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
@@ -429,36 +425,26 @@ try:
             if ep % 5 == 0: env.render()
             # env.render()
 
+            # Get move from algorithm
             tf_prev_state = tf.expand_dims(tf.convert_to_tensor(prev_state), 0)
-
             action = algo.policy(tf_prev_state, ou_noise)
-            # action = policy(tf_prev_state, ou_noise)
             moves.append(action)
-            # Recieve state and reward from environment.
-            state, reward, done, info = env.step(action)
-            # reward += 10*np.abs(action)
 
+            # Interact with environment and record experience
+            state, reward, done, info = env.step(action)
             buffer.record((prev_state, action, reward, state, 0.0 if done else 1.0))
             episodic_reward += reward
-
-            # Get batch of examples from buffer
-            experiences = buffer.get_batch()
-            # Pass to algorithm for training
-            algo.train(experiences)
-
-            # Update target networks (TD3 can catch and skip)
-            algo.update_targets()
-
-            # End this episode when `done` is True
-            if done:
-                break
-
             prev_state = state
 
-        # print("Single episode: ", episodic_reward)
-        ep_reward_list.append(episodic_reward)
+            # Offline Experience Replay
+            experiences = buffer.get_batch()
+            algo.train(experiences)
+
+            # End this episode when `done` is True
+            if done: break
 
         # Mean of last 40 episodes
+        ep_reward_list.append(episodic_reward)
         avg_reward = np.mean(ep_reward_list[-40:])
         print(round(episodic_reward,2), ":", np.round(ou_noise.std_dev,2), "Ep * {} * AvgR = {}. AvgMove {} with mag {}".
                                     format(ep, avg_reward, round(np.mean(moves),2), round(np.mean(np.abs(moves)),2)))
@@ -471,29 +457,6 @@ try:
 except KeyboardInterrupt:
     pass
 
-raise SystemExit
-
-import os
-model_name = f'models/{"TD3" if TD3 else "DDPG"}-{problem}'
-print(f'Early termination, saving as {model_name}')
-i = 1
-itered = model_name
-while os.path.isdir(itered):
-    itered = f'{model_name}_No{i}'
-    i += 1
-model_name = itered
-os.mkdir(f'{model_name}')
-with open(f'{model_name}/{round(np.max(avg_reward_list),2)}', 'w') as f:
-    for arr in output_csv:
-        print(*arr, sep=', ', file=f)
-
-models = {
-    'actor': actor_model,
-    'critic': critic_model
-}
-if TD3: models['critic2'] = critic2_model
-
-for model in models:
-    path = f'{model_name}/{model}'
-    print('Saving', model, 'to', path)
-    models[model].save(path)
+# Save model to models/ directory
+os.path.isdir('models') or os.mkdir('models')
+algo.save('models', problem, output_csv, avg_reward_list)
