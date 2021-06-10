@@ -29,6 +29,47 @@ from tensorflow.keras import layers
 import numpy as np
 import matplotlib.pyplot as plt
 
+class StepTrigger:
+    """
+        Activate 'num' times out of 'every' steps
+    """
+    def __init__(self, every, num=1):
+        self.counter = 0
+        self.max = every
+
+        if every < num:
+            raise Exception("StepTrigger: invalid value (num must be <= every)")
+
+        # 0 should always be part of the active set
+        self.active_set = set([0])
+        out = every - num
+        num -= 1
+
+        # Add 'num' instances to 'active_set'
+        for i in range(1, every):
+            if num > out:
+                self.active_set.add(i)
+                num -= 1
+            else:
+                out -= 1
+
+    def step(self):
+        self.counter += 1
+        if self.counter == self.max:
+            self.counter = 0
+
+    def active(self):
+        return self.counter in self.active_set
+
+class Bounds:
+    def __init__(self, lower, upper):
+        if upper < lower:
+            lower, upper = upper, lower
+        self.lower = lower
+        self.upper = upper
+    def __call__(self, values):
+        return np.clip(values, self.lower, self.upper)
+
 class OUActionNoise:
     def __init__(self, mean, std_deviation, theta=0.15, dt=1e-2, x_initial=None):
         self.theta = theta
@@ -55,110 +96,6 @@ class OUActionNoise:
             self.x_prev = self.x_initial
         else:
             self.x_prev = np.zeros_like(self.mean)
-
-class Buffer:
-    def __init__(self, buffer_capacity=100000, batch_size=64):
-        # Number of "experiences" to store at max
-        self.buffer_capacity = buffer_capacity
-        # Num of tuples to train on.
-        self.batch_size = batch_size
-
-        # Its tells us num of times record() was called.
-        self.buffer_counter = 0
-
-        # Instead of list of tuples as the exp.replay concept go
-        # We use different np.arrays for each tuple element
-        self.state_buffer = np.zeros((self.buffer_capacity, num_states))
-        self.action_buffer = np.zeros((self.buffer_capacity, num_actions))
-        self.reward_buffer = np.zeros((self.buffer_capacity, 1))
-        self.next_state_buffer = np.zeros((self.buffer_capacity, num_states))
-        self.done_buffer = np.zeros((self.buffer_capacity, 1))
-
-    # Takes (s,a,r,s') obervation tuple as input
-    def record(self, obs_tuple):
-        # Set index to zero if buffer_capacity is exceeded,
-        # replacing old records
-        index = self.buffer_counter % self.buffer_capacity
-
-        self.state_buffer[index] = obs_tuple[0]
-        self.action_buffer[index] = obs_tuple[1]
-        self.reward_buffer[index] = obs_tuple[2]
-        self.next_state_buffer[index] = obs_tuple[3]
-        self.done_buffer[index] = obs_tuple[4]
-
-        self.buffer_counter += 1
-
-    # Eager execution is turned on by default in TensorFlow 2. Decorating with tf.function allows
-    # TensorFlow to build a static graph out of the logic and computations in our function.
-    # This provides a large speed up for blocks of code that contain many small TensorFlow operations such as this one.
-    @tf.function
-    def update(
-        self, state_batch, action_batch, reward_batch, next_state_batch, done_batch, update_actor
-    ):
-        # Training and updating Actor & Critic networks.
-        # See Pseudo Code.
-        target_actions = target_actor(next_state_batch, training=True)
-        if TD3: target_actions += tf.random.normal(target_actions.shape, stddev=0.002) #05) #0.01)
-
-        # Use minimum of two target networks to calculate Q-value targets
-        eval = lambda critic: reward_batch + done_batch * gamma * critic(
-            [next_state_batch, target_actions], training=True
-        )
-        y = eval(target_critic)
-        if TD3: y = tf.math.minimum(y, eval(target_critic2))
-
-        # Regress critic_model toward targets
-        with tf.GradientTape() as tape:
-            critic_value = critic_model([state_batch, action_batch], training=True)
-            critic_loss = tf.math.reduce_mean(tf.math.square(y - critic_value))
-        critic_grad = tape.gradient(critic_loss, critic_model.trainable_variables)
-        critic_optimizer.apply_gradients(
-            zip(critic_grad, critic_model.trainable_variables)
-        )
-        # Regress critic2_model toward targets
-        if TD3:
-          with tf.GradientTape() as tape:
-              critic2_value = critic2_model([state_batch, action_batch], training=True) if TD3 else None
-              critic2_loss = tf.math.reduce_mean(tf.math.square(y - critic2_value)) if TD3 else None
-          critic2_grad = tape.gradient(critic2_loss, critic2_model.trainable_variables)
-          critic2_optimizer.apply_gradients(
-              zip(critic2_grad, critic2_model.trainable_variables)
-          )
-
-        # Skip remainder (DO NOT update actor)
-        if not update_actor: return
-
-        # TD3-NOTE: Still use critic_model (1) to optimize policy.
-        with tf.GradientTape() as tape:
-            actions = actor_model(state_batch, training=True)
-            critic_value = critic_model([state_batch, actions], training=True)
-            # Used `-value` as we want to maximize the value given
-            # by the critic for our actions
-            actor_loss = -tf.math.reduce_mean(critic_value)
-
-        actor_grad = tape.gradient(actor_loss, actor_model.trainable_variables)
-        actor_optimizer.apply_gradients(
-            zip(actor_grad, actor_model.trainable_variables)
-        )
-
-    # We compute the loss and update parameters
-    def learn(self, update_actor=True):
-        # Get sampling range
-        record_range = min(self.buffer_counter, self.buffer_capacity)
-        # Randomly sample indices
-        batch_indices = np.random.choice(record_range, self.batch_size)
-
-        # Convert to tensors
-        state_batch = tf.convert_to_tensor(self.state_buffer[batch_indices])
-        action_batch = tf.convert_to_tensor(self.action_buffer[batch_indices])
-        reward_batch = tf.convert_to_tensor(self.reward_buffer[batch_indices])
-        reward_batch = tf.cast(reward_batch, dtype=tf.float32)
-        next_state_batch = tf.convert_to_tensor(self.next_state_buffer[batch_indices])
-        done_batch = tf.convert_to_tensor(self.done_buffer[batch_indices])
-        done_batch = tf.cast(done_batch, dtype=tf.float32)
-
-        self.update(state_batch, action_batch, reward_batch, next_state_batch, done_batch, update_actor)
-
 
 # This update target parameters slowly
 # Based on rate `tau`, which is much less than one.
@@ -203,16 +140,198 @@ def get_critic():
 
     return model
 
-def policy(state, noise_object):
-    sampled_actions = tf.squeeze(actor_model(state))
-    noise = noise_object()
-    # Adding noise to action
-    sampled_actions = sampled_actions.numpy() + noise
+class DDPG:
+    def __init__(self, action_bound, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005):
+        self.action_bound = action_bound
 
-    # We make sure action is within bounds
-    legal_action = np.clip(sampled_actions, lower_bound, upper_bound)
+        # Create set of actor networks
+        self.actor = get_actor()
+        self.actor.optim = tf.keras.optimizers.Adam(actor_lr)
+        self.target_actor = get_actor()
+        self.target_actor.set_weights(self.actor.get_weights())
 
-    return [np.squeeze(legal_action)]
+        # Create set of critic networks
+        self.critic = get_critic()
+        self.critic.optim = tf.keras.optimizers.Adam(critic_lr)
+        self.target_critic = get_critic()
+        self.target_critic.set_weights(self.critic.get_weights())
+
+        # Training parameters
+        self.gamma = gamma
+        self.tau = tau
+
+    def policy(self, state, noise_object):
+        sampled_actions = tf.squeeze(self.actor(state))
+        noise = noise_object()
+        # Adding noise to action
+        sampled_actions = sampled_actions.numpy() + noise
+
+        # We make sure action is within bounds
+        legal_action = self.action_bound(sampled_actions)
+
+        return [np.squeeze(legal_action)]
+
+    # Get predicted actions that target network would make
+    def _get_target_actions(self, states, training):
+        return self.target_actor(states, training=training)
+
+    # Evaluate target critic network
+    def _get_target_values(self, states, actions):
+        return self.target_critic([states, actions], training=True)
+
+    # Update target networks to approach current networks
+    def update_targets(self):
+        update_target(self.target_actor.variables, self.actor.variables, self.tau)
+        update_target(self.target_critic.variables, self.critic.variables, self.tau)
+
+    # Eager execution is turned on by default in TensorFlow 2. Decorating with tf.function allows
+    # TensorFlow to build a static graph out of the logic and computations in our function.
+    # This provides a large speed up for blocks of code that contain many small TensorFlow operations such as this one.
+    @tf.function
+    def train(self, batch, skip_actor=False):
+        # Extract batches from batch dict
+        keys = 'state', 'action', 'reward', 'next_state', 'done'
+        states, actions, rewards, next_states, dones = [batch[key] for key in keys]
+
+        # Get Q-values of next_states (using target actor actions)
+        target_actions = self._get_target_actions(next_states, training=True)
+        y = rewards + dones * self.gamma * self._get_target_values(next_states, target_actions)
+
+        # Regress critic_model toward targets
+        with tf.GradientTape() as tape:
+            critic_value = self.critic([states, actions], training=True)
+            critic_loss = tf.math.reduce_mean(tf.math.square(y - critic_value))
+
+        critic_grad = tape.gradient(critic_loss, self.critic.trainable_variables)
+        self.critic.optim.apply_gradients(
+            zip(critic_grad, self.critic.trainable_variables)
+        )
+
+        # Return early (DO NOT update actor)
+        if skip_actor: return
+
+        # TD3-NOTE: Still use critic_model (1) to optimize policy.
+        with tf.GradientTape() as tape:
+            actor_actions = self.actor(states, training=True)
+            critic_value = self.critic([states, actor_actions], training=True)
+            # Used `-value` as we want to maximize the value given
+            # by the critic for our actions
+            actor_loss = -tf.math.reduce_mean(critic_value)
+
+        actor_grad = tape.gradient(actor_loss, self.actor.trainable_variables)
+        self.actor.optim.apply_gradients(
+            zip(actor_grad, self.actor.trainable_variables)
+        )
+
+class TD3(DDPG):
+    def __init__(self, action_bound, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005):
+        super().__init__(self, action_bound, actor_lr, critic_lr, gamma, tau)
+
+        self.critic2 = get_critic()
+        self.critic2.optim = tf.keras.optimizers.Adam(critic_lr)
+        self.target_critic2 = get_critic()
+        self.target_critic2.set_weights(self.critic2.get_weights())
+
+        self.action_noise = 0.1
+
+        self.update_trigger = StepTrigger(every=4, num=3)
+
+    def _get_target_actions(self, states, training=True):
+        # Start with the same target actions as DDPG algorithm
+        DDPG_target_actions = super()._get_target_actions(states, training)
+        shape = DDPG_target_actions.shape
+        # Add mean-0 noise
+        action_noise =  tf.random.normal(shape, stddev=self.action_noise) #05) #0.01)
+        return DDPG_target_actions + action_noise
+
+    def _get_target_values(self, states, actions):
+        # Get Q-values from DDPG
+        DDPG_values = super()._get_target_values(states, actions)
+        # Calculate Q-values according to second critic network
+        critic2_values = self.target_critic2([states, actions], training=True)
+        # Return minimum (to help prevent Q-value overestimatino)
+        y = tf.math.minimum(DDPG_values, critic2_values)
+        # Cache Q-values for use in update
+        self.last_y = y
+        return y
+
+    def update_targets(self):
+        # Return early if update trigger is not active
+        if not self.update_trigger.active(): return
+        super().update_targets()
+        update_target(self.target_critic2.variables, self.critic2.variables, self.tau)
+
+    @tf.function
+    def train(self, batch):
+        # Update critic and maybe actor
+        super().update(batch, self.update_trigger.active())
+
+        with tf.GradientTape() as tape:
+            critic_value = self.critic([batch['states'], batch['actions']], training=True)
+            critic_loss = tf.math.reduce_mean(tf.math.square(self.last_y - critic_value))
+
+        critic_grad = tape.gradient(critic_loss, self.critic2.trainable_variables)
+        self.critic2.optim.apply_gradients(zip(critic_grad, self.critic2.trainable_variables))
+
+        self.update_trigger.step()
+
+class Buffer:
+    def __init__(self, buffer_capacity=100000, batch_size=64):
+        # Number of "experiences" to store at max
+        self.buffer_capacity = buffer_capacity
+        # Num of tuples to train on.
+        self.batch_size = batch_size
+
+        # Its tells us num of times record() was called.
+        self.buffer_counter = 0
+
+        # Instead of list of tuples as the exp.replay concept go
+        # We use different np.arrays for each tuple element
+        self.state_buffer = np.zeros((self.buffer_capacity, num_states))
+        self.action_buffer = np.zeros((self.buffer_capacity, num_actions))
+        self.reward_buffer = np.zeros((self.buffer_capacity, 1))
+        self.next_state_buffer = np.zeros((self.buffer_capacity, num_states))
+        self.done_buffer = np.zeros((self.buffer_capacity, 1))
+
+    # Takes (s,a,r,s') obervation tuple as input
+    def record(self, obs_tuple):
+        # Set index to zero if buffer_capacity is exceeded,
+        # replacing old records
+        index = self.buffer_counter % self.buffer_capacity
+
+        self.state_buffer[index] = obs_tuple[0]
+        self.action_buffer[index] = obs_tuple[1]
+        self.reward_buffer[index] = obs_tuple[2]
+        self.next_state_buffer[index] = obs_tuple[3]
+        self.done_buffer[index] = obs_tuple[4]
+
+        self.buffer_counter += 1
+
+    # Return batch of examples, use these for algorithm learning
+    def get_batch(self):
+        # Get sampling range
+        record_range = min(self.buffer_counter, self.buffer_capacity)
+        # Randomly sample indices
+        batch_indices = np.random.choice(record_range, self.batch_size)
+
+        # Convert to tensors
+        state_batch = tf.convert_to_tensor(self.state_buffer[batch_indices])
+        action_batch = tf.convert_to_tensor(self.action_buffer[batch_indices])
+        reward_batch = tf.convert_to_tensor(self.reward_buffer[batch_indices])
+        reward_batch = tf.cast(reward_batch, dtype=tf.float32)
+        next_state_batch = tf.convert_to_tensor(self.next_state_buffer[batch_indices])
+        done_batch = tf.convert_to_tensor(self.done_buffer[batch_indices])
+        done_batch = tf.cast(done_batch, dtype=tf.float32)
+
+        return {
+            'state': state_batch,
+            'action': action_batch,
+            'reward': reward_batch,
+            'next_state': next_state_batch,
+            'done': done_batch
+        }
+
+
 
 envs_pyb = ["InvertedPendulumBulletEnv-v0",
             "CartPoleContinuousBulletEnv-v0",
@@ -234,6 +353,7 @@ lower_bound = -1.0 #env.action_space.low[0]
 print("Max Value of Action ->  {}".format(upper_bound))
 print("Min Value of Action ->  {}".format(lower_bound))
 
+
 opt, args = getopt(argv[1:], "", ["TD3", "ActorNN=", "CriticNN="])
 opt = dict(opt)
 
@@ -246,41 +366,44 @@ std_dev = 0.5 #1.5
 min_std_dev = 0.01
 ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.ones(1))
 
-model_path = # "TD3-CartPoleWobbleContinuousEnv-v0_No30"
+# model_path = None # "TD3-CartPoleWobbleContinuousEnv-v0_No30"
 
-actor_model = get_actor()
-critic_model = get_critic()
-critic2_model = get_critic() if TD3 else None
+# actor_model = get_actor()
+# critic_model = get_critic()
+# critic2_model = get_critic() if TD3 else None
 
-if model_path:
-    print(f'Loading old models from models/{model_path}')
-    actor_model, critic_model, critic2_model = [
-        tf.keras.models.load_model(f'models/{model_path}/actor'),
-        tf.keras.models.load_model(f'models/{model_path}/critic'),
-        tf.keras.models.load_model(f'models/{model_path}/critic2') if TD3 else None
-    ]
-target_actor = get_actor()
-target_critic = get_critic()
-target_critic2 = get_critic() if TD3 else None
-
-# Making the weights equal initially
-target_actor.set_weights(actor_model.get_weights())
-target_critic.set_weights(critic_model.get_weights())
-if TD3: target_critic2.set_weights(critic2_model.get_weights())
-
-# Learning rate for actor-critic models
-critic_lr = 0.002 #09  # Original: 0.002
-actor_lr = 0.001 #05   # Original: 0.001
-
-critic_optimizer = tf.keras.optimizers.Adam(critic_lr)
-critic2_optimizer = tf.keras.optimizers.Adam(critic_lr) if TD3 else None
-actor_optimizer = tf.keras.optimizers.Adam(actor_lr)
+# if model_path:
+#     print(f'Loading old models from models/{model_path}')
+#     actor_model, critic_model, critic2_model = [
+#         tf.keras.models.load_model(f'models/{model_path}/actor'),
+#         tf.keras.models.load_model(f'models/{model_path}/critic'),
+#         tf.keras.models.load_model(f'models/{model_path}/critic2') if TD3 else None
+#     ]
+# target_actor = get_actor()
+# target_critic = get_critic()
+# target_critic2 = get_critic() if TD3 else None
+#
+# # Making the weights equal initially
+# target_actor.set_weights(actor_model.get_weights())
+# target_critic.set_weights(critic_model.get_weights())
+# if TD3: target_critic2.set_weights(critic2_model.get_weights())
+#
+# # Learning rate for actor-critic models
+# critic_lr = 0.002 #09  # Original: 0.002
+# actor_lr = 0.001 #05   # Original: 0.001
+#
+# critic_optimizer = tf.keras.optimizers.Adam(critic_lr)
+# critic2_optimizer = tf.keras.optimizers.Adam(critic_lr) if TD3 else None
+# actor_optimizer = tf.keras.optimizers.Adam(actor_lr)
 
 total_episodes = 1000
 # Discount factor for future rewards
-gamma = 0.99
+# gamma = 0.99
 # Used to update target networks
-tau = 0.001  # Original: 0.005
+# tau = 0.001  # Original: 0.005
+
+action_bounds = Bounds(lower_bound, upper_bound)
+algo = DDPG(action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
 
 buffer = Buffer(500000, 64)
 
@@ -308,7 +431,8 @@ try:
 
             tf_prev_state = tf.expand_dims(tf.convert_to_tensor(prev_state), 0)
 
-            action = policy(tf_prev_state, ou_noise)
+            action = algo.policy(tf_prev_state, ou_noise)
+            # action = policy(tf_prev_state, ou_noise)
             moves.append(action)
             # Recieve state and reward from environment.
             state, reward, done, info = env.step(action)
@@ -317,14 +441,13 @@ try:
             buffer.record((prev_state, action, reward, state, 0.0 if done else 1.0))
             episodic_reward += reward
 
-            update_actor_and_targets = not TD3 or step % 3 != 1
-            buffer.learn(update_actor_and_targets)
+            # Get batch of examples from buffer
+            experiences = buffer.get_batch()
+            # Pass to algorithm for training
+            algo.train(experiences)
 
-            # Update target networks every other step
-            if update_actor_and_targets:
-              update_target(target_actor.variables, actor_model.variables, tau)
-              update_target(target_critic.variables, critic_model.variables, tau)
-              if TD3: update_target(target_critic2.variables, critic2_model.variables, tau)
+            # Update target networks (TD3 can catch and skip)
+            algo.update_targets()
 
             # End this episode when `done` is True
             if done:
@@ -347,6 +470,8 @@ try:
 
 except KeyboardInterrupt:
     pass
+
+raise SystemExit
 
 import os
 model_name = f'models/{"TD3" if TD3 else "DDPG"}-{problem}'
