@@ -193,8 +193,8 @@ class DDPG:
         # Create unique folder for this trial
         for i in range(1, 100000):
             path = f'{model_name}/No{i}'
-            if (os.path.isdir(path) or os.mkdir(path)) is None:
-                break
+            if (os.path.isdir(path) or os.mkdir(path)) is None: break
+        print('Saving model to', path)
 
         # Create results file and write csv values
         with open(f'{path}/{round(np.max(avg_reward_list),2)}', 'w') as f:
@@ -214,7 +214,7 @@ class DDPG:
     @tf.function
     def train(self, batch, skip_actor=False):
         # Extract batches from batch dict
-        keys = 'state', 'action', 'reward', 'next_state', 'done'
+        keys = 'states', 'actions', 'rewards', 'next_states', 'dones'
         states, actions, rewards, next_states, dones = [batch[key] for key in keys]
 
         # Get Q-values of next_states (using target actor actions)
@@ -233,7 +233,7 @@ class DDPG:
 
 
         # Return early (DO NOT update actor)
-        if skip_actor: return
+        if skip_actor: return y
 
         # TD3-NOTE: Still use critic_model (1) to optimize policy.
         with tf.GradientTape() as tape:
@@ -248,20 +248,20 @@ class DDPG:
             zip(actor_grad, self.actor.trainable_variables)
         )
 
-        self.update_targets()
+        return y
 
 class TD3(DDPG):
     def __init__(self, action_bound, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005):
-        super().__init__(self, action_bound, actor_lr, critic_lr, gamma, tau)
+        super().__init__(action_bound, actor_lr, critic_lr, gamma, tau)
 
         self.critic2 = get_critic()
         self.critic2.optim = tf.keras.optimizers.Adam(critic_lr)
         self.target_critic2 = get_critic()
         self.target_critic2.set_weights(self.critic2.get_weights())
 
-        self.action_noise = 0.1
+        self.action_noise = 0.00 #0.01 #0.1
 
-        self.update_trigger = StepTrigger(every=4, num=3)
+        self.update_trigger = StepTrigger(every=4, num=4)
 
     def _get_target_actions(self, states, training=True):
         # Start with the same target actions as DDPG algorithm
@@ -277,10 +277,8 @@ class TD3(DDPG):
         # Calculate Q-values according to second critic network
         critic2_values = self.target_critic2([states, actions], training=True)
         # Return minimum (to help prevent Q-value overestimatino)
-        y = tf.math.minimum(DDPG_values, critic2_values)
-        # Cache Q-values for use in update
-        self.last_y = y
-        return y
+        # return tf.math.minimum(DDPG_values, critic2_values)
+        return DDPG_values
 
     def update_targets(self):
         # Return early if update trigger is not active
@@ -295,12 +293,12 @@ class TD3(DDPG):
     @tf.function
     def train(self, batch):
         # Update critic and maybe actor
-        super().update(batch, self.update_trigger.active())
+        y = super().train(batch, not self.update_trigger.active())
 
+        # Update critic2
         with tf.GradientTape() as tape:
-            critic_value = self.critic([batch['states'], batch['actions']], training=True)
-            critic_loss = tf.math.reduce_mean(tf.math.square(self.last_y - critic_value))
-
+            critic_value = self.critic2([batch['states'], batch['actions']], training=True)
+            critic_loss = tf.math.reduce_mean(tf.math.square(y - critic_value))
         critic_grad = tape.gradient(critic_loss, self.critic2.trainable_variables)
         self.critic2.optim.apply_gradients(zip(critic_grad, self.critic2.trainable_variables))
 
@@ -355,14 +353,12 @@ class Buffer:
         done_batch = tf.cast(done_batch, dtype=tf.float32)
 
         return {
-            'state': state_batch,
-            'action': action_batch,
-            'reward': reward_batch,
-            'next_state': next_state_batch,
-            'done': done_batch
+            'states': state_batch,
+            'actions': action_batch,
+            'rewards': reward_batch,
+            'next_states': next_state_batch,
+            'dones': done_batch
         }
-
-
 
 envs_pyb = ["InvertedPendulumBulletEnv-v0",
             "CartPoleContinuousBulletEnv-v0",
@@ -373,41 +369,44 @@ envs_pyb = ["InvertedPendulumBulletEnv-v0",
 problem = envs_pyb[2]
 env = gym.make(problem)
 
-num_states = env.observation_space.shape[0]
-print("Size of State Space ->  {}".format(num_states))
-num_actions = env.action_space.shape[0]
-print("Size of Action Space ->  {}".format(num_actions))
+def get_env_details(env):
+    num_states = env.observation_space.shape[0]
+    print("Size of State Space ->  {}".format(num_states))
+    num_actions = env.action_space.shape[0]
+    print("Size of Action Space ->  {}".format(num_actions))
 
-upper_bound = +1.0 #env.action_space.high[0]
-lower_bound = -1.0 #env.action_space.low[0]
+    upper_bound = +1.0 #env.action_space.high[0]
+    lower_bound = -1.0 #env.action_space.low[0]
 
-print("Max Value of Action ->  {}".format(upper_bound))
-print("Min Value of Action ->  {}".format(lower_bound))
+    print("Max Value of Action ->  {}".format(upper_bound))
+    print("Min Value of Action ->  {}".format(lower_bound))
+
+    return num_states, num_actions, lower_bound, upper_bound
+num_states, num_actions, lower_bound, upper_bound = get_env_details(env)
 
 opt, args = getopt(argv[1:], "", ["TD3", "ActorNN=", "CriticNN="])
 opt = dict(opt)
 
-TD3 = "--TD3" in opt
+TD3notDDPG = "--TD3" in opt
 ActorNN = int(opt.get('--ActorNN',32))
 CriticNN = int(opt.get('--CriticNN',32))
 
+# Construct noise object
 std_dev = 0.5 #1.5
 min_std_dev = 0.01
 ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.ones(1))
 
-
-total_episodes = 1000
-
+# Instantiate Algorithm object
 action_bounds = Bounds(lower_bound, upper_bound)
-algo = DDPG(action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
-
+_algo = TD3 if TD3notDDPG else DDPG
+algo = _algo(action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
 buffer = Buffer(500000, 64)
 
-# To store reward history of each episode
+# Store reward history of each episode, and averages over last 40
 ep_reward_list = []
-# To store average reward history of last few episodes
 avg_reward_list = []
 
+total_episodes = 1000
 output_csv = [["ActorNN",ActorNN,"CriticNN",CriticNN]]
 output_csv.append(["Ep","Reward","AvgReward40"])
 try:
@@ -439,6 +438,7 @@ try:
             # Offline Experience Replay
             experiences = buffer.get_batch()
             algo.train(experiences)
+            algo.update_targets()
 
             # End this episode when `done` is True
             if done: break
