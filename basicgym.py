@@ -323,7 +323,7 @@ class HIRO:
 
     def __init__(self, num_states, num_actions, action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005):
         # Number of low-level actions between high-level actions
-        self.period = 10
+        self.period = 20
 
         # Instantiate hierarchical algorithms
         self.lo_algo = DDPG(num_states*2, num_actions, action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
@@ -335,6 +335,7 @@ class HIRO:
         self.hi_trigger = StepTrigger(every=self.period, num=1)
         # Buffer including sequences of states, goals, actions, rewards, and final state
         self.hi_buffer = [[[], [], [], [], None]]
+        self.lo_rewards = []
 
     def _goal_transition_func(self, state, goal, next_state):
         # state + goal = next_state + next_goal
@@ -398,6 +399,7 @@ class HIRO:
         # print(self.prev_goal, self.prev_state)
         # Transition goal to keep target (state + goal) fixed
         goal = self._goal_transition_func(self.prev_state, self.prev_goal, state)
+        goal = np.zeros_like(state).reshape(1,-1)
         # print(goal)
         lo_state = tf.concat([state, goal], 1)
         # print(type(lo_state), np.shape(lo_state), lo_state)
@@ -413,7 +415,10 @@ class HIRO:
 
         prev_goal = self.prev_goal
         lo_reward = self._reward(prev_state, prev_goal, action, state) #if not done else reward
+        if done: lo_reward = -10.0
+        else: lo_reward = 0.0
         next_goal = self._goal_transition_func(prev_state, prev_goal, state)
+        self.lo_rewards.append(np.round(lo_reward, 2))
 
         lo_prev_state = tf.concat([prev_state, prev_goal], 1)
         lo_state = tf.concat([state, next_goal], 1)
@@ -425,7 +430,11 @@ class HIRO:
 
         # If done_val indicates that the trial has terminated
         if done:
+            print('Lo_Reward:', np.round(np.mean(self.lo_rewards),2), end='\t')
+            self.lo_rewards = []
             self.hi_trigger.reset()
+            self.lo_noise.std_dev = np.maximum(0.005, self.lo_noise.std_dev * 0.98)
+
 
         # Time to update hi_algo
         if self.hi_trigger.active():
@@ -510,7 +519,7 @@ envs_pyb = ["InvertedPendulumBulletEnv-v0",
 # problem = "Pendulum-v0"
 # problem = "MountainCarContinuous-v0"
 # problem = "Acrobot-v1"
-problem = envs_pyb[3]
+problem = envs_pyb[2]
 env = gym.make(problem)
 
 def get_env_details(env):
@@ -545,7 +554,7 @@ ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.one
 # Instantiate Algorithm object
 action_bounds = Bounds(lower_bound, upper_bound)
 _algo_cls = globals()[AlgoName]
-algo = _algo_cls(num_states, num_actions, action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
+algo = _algo_cls(num_states, num_actions, action_bounds, actor_lr=0.005, critic_lr=0.01, gamma=0.99, tau=0.005)
 
 # if AlgoName == "HIRO":
 #     algo.pretrain(env, ou_noise)
@@ -576,7 +585,7 @@ try:
             # Get move from algorithm
             tf_prev_state = tf.expand_dims(tf.convert_to_tensor(prev_state), 0)
             # print(type(tf_prev_state), np.shape(tf_prev_state), tf_prev_state)
-            action = algo.policy(tf_prev_state, ou_noise)[0]
+            action = algo.policy(tf_prev_state, ou_noise)
 
             moves.append(action)
 
@@ -595,8 +604,8 @@ try:
         # Mean of last 40 episodes
         ep_reward_list.append(episodic_reward)
         avg_reward = np.mean(ep_reward_list[-40:])
-        print(round(episodic_reward,2), ":", np.round(ou_noise.std_dev,2), "Ep * {} * AvgR = {}. Move/{} {} with mag {}".
-                                    format(ep, avg_reward, len(moves), round(np.mean(moves),2), round(np.mean(np.abs(moves)),2)))
+        print('\n',round(episodic_reward,2), ":", np.round(ou_noise.std_dev,2), "Ep * {} * AvgR = {}. Move/{} {} with mag {}".
+                                    format(ep, avg_reward, len(moves), round(np.mean(moves),2), round(np.mean(np.abs(moves)),2)), end='')
         avg_reward_list.append(avg_reward)
         output_csv.append([ep, round(episodic_reward,2), round(avg_reward,2)])
 

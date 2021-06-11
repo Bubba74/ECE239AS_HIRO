@@ -5,6 +5,7 @@ results/
 
 test.py
 timings_0.json
+output
 
 __pycache__
 */__init__.py
