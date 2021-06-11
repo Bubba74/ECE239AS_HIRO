@@ -54,6 +54,9 @@ class StepTrigger:
             else:
                 out -= 1
 
+    def reset(self):
+        self.counter = 0
+
     def step(self):
         self.counter += 1
         if self.counter == self.max:
@@ -105,21 +108,21 @@ def update_target(target_weights, weights, tau):
     for (a, b) in zip(target_weights, weights):
         a.assign(b * tau + a * (1 - tau))
 
-def get_actor():
+def get_actor(num_states, num_actions):
     # Initialize weights between -3e-3 and 3-e3
     last_init = tf.random_uniform_initializer(minval=-0.003, maxval=0.003)
 
     inputs = layers.Input(shape=(num_states,))
     out = layers.Dense(ActorNN, activation="relu")(inputs)
     out = layers.Dense(ActorNN, activation="relu")(out)
-    outputs = layers.Dense(1, activation="tanh", kernel_initializer=last_init)(out)
+    outputs = layers.Dense(num_actions, activation="tanh", kernel_initializer=last_init)(out)
 
     # Our upper bound is 2.0 for Pendulum.
     outputs = outputs * upper_bound
     model = tf.keras.Model(inputs, outputs)
     return model
 
-def get_critic():
+def get_critic(num_states, num_actions):
     # State as input
     state_input = layers.Input(shape=(num_states))
     state_out = layers.Dense(16, activation="relu")(state_input)
@@ -142,24 +145,26 @@ def get_critic():
     return model
 
 class DDPG:
-    def __init__(self, action_bound, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005):
+    def __init__(self, num_states, num_actions, action_bound, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005, buffer_size=500_000):
         self.action_bound = action_bound
 
         # Create set of actor networks
-        self.actor = get_actor()
+        self.actor = get_actor(num_states, num_actions)
         self.actor.optim = tf.keras.optimizers.Adam(actor_lr)
-        self.target_actor = get_actor()
+        self.target_actor = get_actor(num_states, num_actions)
         self.target_actor.set_weights(self.actor.get_weights())
 
         # Create set of critic networks
-        self.critic = get_critic()
+        self.critic = get_critic(num_states, num_actions)
         self.critic.optim = tf.keras.optimizers.Adam(critic_lr)
-        self.target_critic = get_critic()
+        self.target_critic = get_critic(num_states, num_actions)
         self.target_critic.set_weights(self.critic.get_weights())
 
         # Training parameters
         self.gamma = gamma
         self.tau = tau
+
+        self.buffer = Buffer(num_states, num_actions, 500000, 64)
 
     def policy(self, state, noise_object):
         sampled_actions = tf.squeeze(self.actor(state))
@@ -171,6 +176,9 @@ class DDPG:
         legal_action = self.action_bound(sampled_actions)
 
         return [np.squeeze(legal_action)]
+
+    def record(self, prev_state, action, reward, state, done):
+        self.buffer.record((prev_state, action, reward, state, 0.0 if done else 1.0))
 
     # Get predicted actions that target network would make
     def _get_target_actions(self, states, training):
@@ -212,7 +220,7 @@ class DDPG:
     # TensorFlow to build a static graph out of the logic and computations in our function.
     # This provides a large speed up for blocks of code that contain many small TensorFlow operations such as this one.
     @tf.function
-    def train(self, batch, skip_actor=False):
+    def learn(self, batch, skip_actor=False):
         # Extract batches from batch dict
         keys = 'states', 'actions', 'rewards', 'next_states', 'dones'
         states, actions, rewards, next_states, dones = [batch[key] for key in keys]
@@ -247,21 +255,26 @@ class DDPG:
         self.actor.optim.apply_gradients(
             zip(actor_grad, self.actor.trainable_variables)
         )
-
         return y
 
-class TD3(DDPG):
-    def __init__(self, action_bound, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005):
-        super().__init__(action_bound, actor_lr, critic_lr, gamma, tau)
+    def train(self):
+        experiences = self.buffer.get_batch()
+        self.learn(experiences)
+        self.update_targets()
 
-        self.critic2 = get_critic()
+class TD3(DDPG):
+    def __init__(self, num_states, num_actions, action_bound, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005):
+        super().__init__(num_states, num_actions, action_bound, actor_lr, critic_lr, gamma, tau)
+
+        self.critic2 = get_critic(num_states, num_actions)
         self.critic2.optim = tf.keras.optimizers.Adam(critic_lr)
-        self.target_critic2 = get_critic()
+        self.target_critic2 = get_critic(num_states, num_actions)
         self.target_critic2.set_weights(self.critic2.get_weights())
 
-        self.action_noise = 0.00 #0.01 #0.1
+        self.action_noise = 0.05 #0.01 #0.1
+        self.minimize_target_values = True
 
-        self.update_trigger = StepTrigger(every=4, num=4)
+        self.update_trigger = StepTrigger(every=4, num=2)
 
     def _get_target_actions(self, states, training=True):
         # Start with the same target actions as DDPG algorithm
@@ -274,11 +287,13 @@ class TD3(DDPG):
     def _get_target_values(self, states, actions):
         # Get Q-values from DDPG
         DDPG_values = super()._get_target_values(states, actions)
-        # Calculate Q-values according to second critic network
-        critic2_values = self.target_critic2([states, actions], training=True)
-        # Return minimum (to help prevent Q-value overestimatino)
-        # return tf.math.minimum(DDPG_values, critic2_values)
-        return DDPG_values
+        if not self.minimize_target_values:
+            return DDPG_values
+        else:
+            # Calculate Q-values according to second critic network
+            critic2_values = self.target_critic2([states, actions], training=True)
+            # Return minimum (to help prevent Q-value overestimatino)
+            return tf.math.minimum(DDPG_values, critic2_values)
 
     def update_targets(self):
         # Return early if update trigger is not active
@@ -291,9 +306,9 @@ class TD3(DDPG):
         self.critic2.save(f'{path}/critic2')
 
     @tf.function
-    def train(self, batch):
+    def learn(self, batch):
         # Update critic and maybe actor
-        y = super().train(batch, not self.update_trigger.active())
+        y = super().learn(batch, not self.update_trigger.active())
 
         # Update critic2
         with tf.GradientTape() as tape:
@@ -304,8 +319,133 @@ class TD3(DDPG):
 
         self.update_trigger.step()
 
+class HIRO:
+
+    def __init__(self, num_states, num_actions, action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005):
+        # Number of low-level actions between high-level actions
+        self.period = 10
+
+        # Instantiate hierarchical algorithms
+        self.lo_algo = DDPG(num_states*2, num_actions, action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
+        self.hi_algo = DDPG(num_states, num_states, action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
+
+        self.lo_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(0.1) * np.ones(1))
+        self.hi_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(0.1) * np.ones(1))
+
+        self.hi_trigger = StepTrigger(every=self.period, num=1)
+        # Buffer including sequences of states, goals, actions, rewards, and final state
+        self.hi_buffer = [[[], [], [], [], None]]
+
+    def _goal_transition_func(self, state, goal, next_state):
+        # state + goal = next_state + next_goal
+        state = np.array(state)
+        next_goal = goal + (state - next_state)
+        return np.reshape(next_goal, (1,-1))
+
+    def _reward(self, state, goal, action, next_state):
+        state = np.array(state)
+        return -np.linalg.norm(state + goal - next_state)
+
+    def _squash_hiexp(self, hi_exp, off_policy_correction=False):
+        states, goals, actions, rewards, next_state = hi_exp
+        return states[0], goals[0], np.sum(rewards), next_state
+
+    def save(self, *args):
+        print('Have not implemented saving yet')
+
+    def pretrain(self, env, noise):
+        # Pre-train lower level network for 2M steps
+        random_goal = lambda : np.random.normal(size=len(prev_state), scale=0.0)
+        length = 100_000
+        prev_state = env.reset()
+        prev_goal = random_goal()
+        reward_list = []
+        try:
+            for i in range(length):
+                if i % 1000 == 0: print('Pretrain step', i, '/', length, np.mean(reward_list[-1000:]))
+                lo_state = np.append(prev_state, prev_goal)
+                tf_prev_state = tf.expand_dims(tf.convert_to_tensor(lo_state), 0)
+                action = self.lo_algo.policy(tf_prev_state, noise)
+
+                # Interact with environment and record experience
+                state, __reward, done, __info = env.step(action)
+                reward = self._reward(prev_state, prev_goal, action, state)
+                goal = self._goal_transition_func(prev_state, prev_goal, state)
+                self.lo_algo.record(lo_state, action, reward, np.append(state, goal), 0.0 if done else 1.0)
+                prev_state = state
+                prev_goal = goal
+
+                reward_list.append(reward)
+
+                # Offline Experience Replay
+                self.lo_algo.train()
+
+                if done:
+                    prev_state = env.reset()
+                    prev_goal = random_goal()
+        except KeyboardInterrupt:
+            pass
+        with open('output', 'w') as f:
+            print(reward_list, sep='\n', file=f)
+
+    def policy(self, state, noise):
+        # Create new goal from hi-network
+        if self.hi_trigger.active():
+            self.prev_goal = np.reshape(self.hi_algo.policy(state, self.hi_noise), (1,-1))
+            self.prev_state = state
+            self.prev_goal = np.zeros_like(state).reshape(1,-1)
+            # print('New Goal: ', self.prev_goal.flatten())
+        # print(self.prev_goal, self.prev_state)
+        # Transition goal to keep target (state + goal) fixed
+        goal = self._goal_transition_func(self.prev_state, self.prev_goal, state)
+        # print(goal)
+        lo_state = tf.concat([state, goal], 1)
+        # print(type(lo_state), np.shape(lo_state), lo_state)
+        # Prompt lo-network for atomic action (on Env)
+        action = self.lo_algo.policy(lo_state, self.lo_noise)
+        return action
+
+    def record(self, prev_state, action, reward, state, done):
+        self.hi_trigger.step()
+
+        prev_state = np.reshape(prev_state, (1,-1))
+        state = np.reshape(state, (1,-1))
+
+        prev_goal = self.prev_goal
+        lo_reward = self._reward(prev_state, prev_goal, action, state) #if not done else reward
+        next_goal = self._goal_transition_func(prev_state, prev_goal, state)
+
+        lo_prev_state = tf.concat([prev_state, prev_goal], 1)
+        lo_state = tf.concat([state, next_goal], 1)
+        self.lo_algo.record(lo_prev_state, action, lo_reward, lo_state, done)
+        self.hi_buffer[-1][0].append(prev_state)
+        self.hi_buffer[-1][1].append(prev_goal)
+        self.hi_buffer[-1][2].append(action)
+        self.hi_buffer[-1][3].append(reward)
+
+        # If done_val indicates that the trial has terminated
+        if done:
+            self.hi_trigger.reset()
+
+        # Time to update hi_algo
+        if self.hi_trigger.active():
+            self.hi_buffer[-1][4] = state
+
+            # It's time to package the high-level experiences up.
+            # Low-level network is relatively fresh so there's no need to correct for it
+            hiexp = self._squash_hiexp(self.hi_buffer[-1], off_policy_correction=False)
+            # Setup new hi-level list of low-level experiences
+            self.hi_buffer.append([[],[],[],[],None])
+
+        self.prev_goal = next_goal
+        self.prev_state = state
+
+    def train(self):
+        pass
+
+
 class Buffer:
-    def __init__(self, buffer_capacity=100000, batch_size=64):
+    def __init__(self, num_states, num_actions, buffer_capacity=100000, batch_size=64):
         # Number of "experiences" to store at max
         self.buffer_capacity = buffer_capacity
         # Num of tuples to train on.
@@ -321,6 +461,9 @@ class Buffer:
         self.reward_buffer = np.zeros((self.buffer_capacity, 1))
         self.next_state_buffer = np.zeros((self.buffer_capacity, num_states))
         self.done_buffer = np.zeros((self.buffer_capacity, 1))
+
+    def reset(self):
+        self.buffer_counter = 0
 
     # Takes (s,a,r,s') obervation tuple as input
     def record(self, obs_tuple):
@@ -362,11 +505,12 @@ class Buffer:
 
 envs_pyb = ["InvertedPendulumBulletEnv-v0",
             "CartPoleContinuousBulletEnv-v0",
-            "CartPoleWobbleContinuousEnv-v0"]
+            "CartPoleWobbleContinuousEnv-v0",
+            "ReacherBulletEnv-v0"]
 # problem = "Pendulum-v0"
 # problem = "MountainCarContinuous-v0"
 # problem = "Acrobot-v1"
-problem = envs_pyb[2]
+problem = envs_pyb[3]
 env = gym.make(problem)
 
 def get_env_details(env):
@@ -384,10 +528,12 @@ def get_env_details(env):
     return num_states, num_actions, lower_bound, upper_bound
 num_states, num_actions, lower_bound, upper_bound = get_env_details(env)
 
-opt, args = getopt(argv[1:], "", ["TD3", "ActorNN=", "CriticNN="])
+opt, args = getopt(argv[1:], "", ["TD3", "HIRO", "ActorNN=", "CriticNN="])
 opt = dict(opt)
 
-TD3notDDPG = "--TD3" in opt
+AlgoName = "DDPG"
+if "--TD3" in opt: AlgoName = "TD3"
+if "--HIRO" in opt: AlgoName = "HIRO"
 ActorNN = int(opt.get('--ActorNN',32))
 CriticNN = int(opt.get('--CriticNN',32))
 
@@ -398,15 +544,18 @@ ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(std_dev) * np.one
 
 # Instantiate Algorithm object
 action_bounds = Bounds(lower_bound, upper_bound)
-_algo = TD3 if TD3notDDPG else DDPG
-algo = _algo(action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
-buffer = Buffer(500000, 64)
+_algo_cls = globals()[AlgoName]
+algo = _algo_cls(num_states, num_actions, action_bounds, actor_lr=0.001, critic_lr=0.002, gamma=0.99, tau=0.005)
+
+# if AlgoName == "HIRO":
+#     algo.pretrain(env, ou_noise)
+# raise SystemExit
 
 # Store reward history of each episode, and averages over last 40
 ep_reward_list = []
 avg_reward_list = []
 
-total_episodes = 1000
+total_episodes = 2_000
 output_csv = [["ActorNN",ActorNN,"CriticNN",CriticNN]]
 output_csv.append(["Ep","Reward","AvgReward40"])
 try:
@@ -426,19 +575,19 @@ try:
 
             # Get move from algorithm
             tf_prev_state = tf.expand_dims(tf.convert_to_tensor(prev_state), 0)
-            action = algo.policy(tf_prev_state, ou_noise)
+            # print(type(tf_prev_state), np.shape(tf_prev_state), tf_prev_state)
+            action = algo.policy(tf_prev_state, ou_noise)[0]
+
             moves.append(action)
 
             # Interact with environment and record experience
             state, reward, done, info = env.step(action)
-            buffer.record((prev_state, action, reward, state, 0.0 if done else 1.0))
+            algo.record(prev_state, action, reward, state, done)
             episodic_reward += reward
             prev_state = state
 
             # Offline Experience Replay
-            experiences = buffer.get_batch()
-            algo.train(experiences)
-            algo.update_targets()
+            algo.train()
 
             # End this episode when `done` is True
             if done: break
@@ -446,8 +595,8 @@ try:
         # Mean of last 40 episodes
         ep_reward_list.append(episodic_reward)
         avg_reward = np.mean(ep_reward_list[-40:])
-        print(round(episodic_reward,2), ":", np.round(ou_noise.std_dev,2), "Ep * {} * AvgR = {}. AvgMove {} with mag {}".
-                                    format(ep, avg_reward, round(np.mean(moves),2), round(np.mean(np.abs(moves)),2)))
+        print(round(episodic_reward,2), ":", np.round(ou_noise.std_dev,2), "Ep * {} * AvgR = {}. Move/{} {} with mag {}".
+                                    format(ep, avg_reward, len(moves), round(np.mean(moves),2), round(np.mean(np.abs(moves)),2)))
         avg_reward_list.append(avg_reward)
         output_csv.append([ep, round(episodic_reward,2), round(avg_reward,2)])
 
