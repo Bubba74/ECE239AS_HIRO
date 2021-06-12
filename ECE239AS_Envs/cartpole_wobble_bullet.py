@@ -30,7 +30,7 @@ class CartPoleWobbleContinuousEnv(CartPoleContinuousBulletEnv):
 
     def change_target(self):
         self.target_pos = np.random.uniform(-self.x_threshold/2, self.x_threshold/2)
-        print('Target:', np.round(self.target_pos,2), end='\t')
+        print('    Target: {:5}'.format(np.round(self.target_pos,2)), flush=True)
 
     def step(self, action):
         raw_state, reward, done, info = super().step(action)
